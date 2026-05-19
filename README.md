@@ -2,7 +2,7 @@
 
 **Kenji** is a CLI for installing and managing AI agent instruction sets (skills) and collections of skills (stacks).
 
-Instead of copying prompts, rules, or SKILL files across projects, Kenji lets you install structured agent capabilities directly into your project with a single command.
+Instead of copying prompts, rules, or skill files across projects, Kenji lets you install structured agent capabilities directly into your project with a single command.
 
 > Think of Kenji as package management for AI agent skills.
 
@@ -51,7 +51,7 @@ Kenji installs agent instruction assets such as:
 - `SKILL.md` files
 - structured instruction files (`*.md`)
 - agent workflows, reasoning rules, prompt toolkits
-- optional `kenji.json` metadata
+- `kenji.json` metadata
 
 Skills are installed inside your project (or globally) so agentic IDEs and AI tools can reference them during development.
 
@@ -59,14 +59,35 @@ Skills are installed inside your project (or globally) so agentic IDEs and AI to
 
 ## Directory Structure
 
+Each installed skill gets its own folder inside a namespace folder named after its source repo. This prevents collisions when multiple skills come from the same repository.
+
 ### Project install *(default)*
 
 ```
 .kenji/
   skills/
-    <skill-name>/
-      SKILL.md
-      kenji.json   ← install metadata
+    <repo-slug>/
+      <skill-slug>/
+        SKILL.md
+        kenji.json   ← install metadata
+```
+
+**Example:**
+
+```
+.kenji/
+  skills/
+    anthropics-skills/
+      mcp-builder/
+        SKILL.md
+        kenji.json
+      design-algorithmic-art/
+        SKILL.md
+        kenji.json
+    someuser-kenji-registry/
+      agents-prompt/
+        Agents.md
+        kenji.json
 ```
 
 ### Global install
@@ -74,12 +95,15 @@ Skills are installed inside your project (or globally) so agentic IDEs and AI to
 ```
 ~/.kenji/
   skills/
-    <skill-name>/
-      SKILL.md
-      kenji.json
+    <repo-slug>/
+      <skill-slug>/
+        SKILL.md
+        kenji.json
   stacks/
     <stack-name>.json
 ```
+
+The repo slug is derived from the source repo as `<owner>-<repo>`. The skill slug is derived from the registry skill name, or the folder name containing the skill file.
 
 ---
 
@@ -89,11 +113,20 @@ Kenji has a multi-registry architecture backed by the official Kenji registry an
 
 [https://kenjiprotocol.com/registry](https://kenjiprotocol.com/registry)
 
-The registry aggregates structured JSON metadata files sourced from GitHub repositories. Search runs against the Kenji API, which caches results via Vercel KV for global performance.
+Registry data is indexed into Vercel KV when a registry is added or updated. Search results are served directly from this index — no runtime GitHub crawling occurs. Community registry data persists independently; it is never affected by official registry updates or cache rebuilds.
 
 - No proprietary database
 - Completely open protocol
 - Community GitHub repositories can act as additional registries
+
+### Update timing
+
+| Event | Search results |
+|---|---|
+| `kenji registry add user/repo` | **Immediate** — crawled and indexed on submission |
+| `kenji registry update user/repo` | **Immediate** — re-crawled and re-indexed on command |
+| Edit to an existing `skill.json` in your repo | **After running** `kenji registry update user/repo` |
+| Official registry changes | **Within 6 hours** — automatic cron refresh |
 
 ---
 
@@ -169,17 +202,31 @@ If no namespace is provided, Kenji defaults to the `kenji` namespace.
 **From GitHub repo:**
 ```bash
 kenji install user/repo
-kenji install anthropics/prompt-engineering
+kenji install anthropics/skills
 ```
 
-Downloads all valid instruction files (`*.md`, excluding README).
+Kenji fetches the full repository tree in a single API call and automatically discovers all skills (any `.md` file that isn't a README). If more than one skill is found, a preview is shown and confirmation is requested before installing:
+
+```
+Discovered 3 skills in anthropics/skills:
+
+  anthropics-skills/mcp-builder
+  anthropics-skills/design-algorithmic-art
+  anthropics-skills/prompt-engineering
+
+Install all 3 skills? (Y/n)
+```
+
+If only one skill is found, it installs immediately without a prompt.
+
+Each discovered skill is installed into its own `<repo-slug>/<skill-slug>/` folder.
 
 **From GitHub folder (tree URL):**
 ```bash
 kenji install https://github.com/user/repo/tree/main/skills/debug
 ```
 
-Installs only the files inside that folder.
+Installs only the files inside that specific folder as a single skill.
 
 **From GitHub blob URL:**
 ```bash
@@ -206,29 +253,41 @@ This skill is from a community registry and has not been reviewed by the Kenji t
 Proceed with installation? (y/N)
 ```
 
-Use `--force` to skip the prompt only for reinstalls, not security confirmation.
-
 ---
 
 ### `kenji list`
 
-List installed skills.
+List installed skills. Output shows `<repo-slug>/<skill-slug>` for each installed skill.
 
 ```bash
 kenji list              # Project skills in ./.kenji/skills/
 kenji list --global     # Global skills in ~/.kenji/skills/
 ```
 
+**Example output:**
+```
+Local skills (current folder):
+
+  anthropics-skills/mcp-builder
+  anthropics-skills/design-algorithmic-art
+  revanthjanumula-kenji-registry/agents-prompt
+```
+
 ---
 
 ### `kenji remove`
 
-Remove an installed skill.
+Remove an installed skill. If the skill name matches more than one installed skill, Kenji shows all matches and asks you to specify the full path.
 
 ```bash
 kenji remove <skill>             # Remove from current project
 kenji remove <skill> --global    # Remove from global install
+
+# Disambiguate when multiple repos have a skill with the same name:
+kenji remove anthropics-skills/mcp-builder
 ```
+
+After removal, the parent repo-slug folder is cleaned up automatically if it becomes empty.
 
 ---
 
@@ -240,9 +299,12 @@ Show where a skill is installed and how it was installed.
 kenji where <skill>
 kenji where <skill> --json
 kenji where <skill> --verbose
+
+# Disambiguate:
+kenji where anthropics-skills/mcp-builder
 ```
 
-Checks the local project first, then global. Displays scope, path, install source, and install type.
+Checks the local project first, then global. Displays scope, path (`<repo-slug>/<skill-slug>`), install source, and install type.
 
 **Flags:**
 
@@ -255,11 +317,14 @@ Checks the local project first, then global. Displays scope, path, install sourc
 
 ### `kenji use`
 
-Copy a globally installed skill into the current project.
+Copy a globally installed skill into the current project, preserving the `<repo-slug>/<skill-slug>` folder structure.
 
 ```bash
 kenji use <skill>
 kenji use <skill> --force
+
+# Disambiguate:
+kenji use anthropics-skills/mcp-builder
 ```
 
 Useful when you want to customize or commit a global skill inside a specific project. Use `--force` to overwrite an existing local copy.
@@ -275,6 +340,50 @@ kenji doctor
 ```
 
 Checks Node.js version, GitHub token status, and local installation paths.
+
+---
+
+## Skill `kenji.json` Metadata
+
+Every installed skill contains a `kenji.json` file with metadata about the install:
+
+```json
+{
+  "name": "mcp-builder",
+  "repo": "anthropics/skills",
+  "source": "github.com/anthropics/skills#skills/mcp-builder",
+  "install_type": "registry",
+  "scope": "local",
+  "installed_at": "2026-05-14T...",
+  "skillPath": "anthropics-skills/mcp-builder"
+}
+```
+
+| Field | Description |
+|---|---|
+| `name` | Skill slug |
+| `repo` | Source GitHub repo |
+| `source` | Full source reference |
+| `install_type` | `registry`, `github`, `github-tree`, or `raw` |
+| `scope` | `local` or `global` |
+| `installed_at` | ISO timestamp |
+| `skillPath` | `<repo-slug>/<skill-slug>` — the install path relative to the skills directory |
+
+---
+
+## Ambiguous Skill Names
+
+If two different repos both contain a skill with the same name, commands like `remove`, `where`, `use`, and `stack add` will detect the ambiguity and show all matches:
+
+```
+Multiple installed skills match "mcp-builder":
+
+  - anthropics-skills/mcp-builder
+  - openai-skills/mcp-builder
+
+Specify the full path:
+  kenji remove anthropics-skills/mcp-builder
+```
 
 ---
 
@@ -332,7 +441,7 @@ Kenji resolves:
 - `registry` entries → looked up in the aggregated registry, then installed from the referenced repo
 - `github` entries → installed from `user/repo` directly
 - `url` entries → installed from tree URL, blob URL, or raw file URL
-- `global` entries → copied from `~/.kenji/skills/`
+- `global` entries → copied from `~/.kenji/skills/` into `.kenji/skills/`, preserving the `<repo-slug>/<skill-slug>` structure
 
 ---
 
@@ -402,7 +511,7 @@ Stack files (produced by `kenji stack export`) follow this schema:
     { "type": "registry", "value": "kenji/react-debug" },
     { "type": "github",   "value": "user/repo" },
     { "type": "url",      "value": "https://github.com/user/repo/tree/main/skills/frontend" },
-    { "type": "global",   "value": "my-local-skill" }
+    { "type": "global",   "value": "my-skill-slug" }
   ]
 }
 ```
@@ -425,7 +534,7 @@ Stack files (produced by `kenji stack export`) follow this schema:
 | `"registry"` | `namespace/name` | A skill from any Kenji registry |
 | `"github"` | `user/repo` | A GitHub repository |
 | `"url"` | Full URL | GitHub tree, blob, or raw file URL |
-| `"global"` | Folder name | A locally installed global skill |
+| `"global"` | Skill slug | A locally installed global skill |
 
 ---
 
@@ -433,14 +542,24 @@ Stack files (produced by `kenji stack export`) follow this schema:
 
 ### `kenji registry add`
 
-Add a community GitHub repository as a registry.
+Add a community GitHub repository as a registry. Kenji crawls the repo immediately and indexes all valid skills and stacks into the search index.
 
 ```bash
 kenji registry add user/kenji-registry
 kenji registry add https://github.com/user/kenji-registry
 ```
 
-The repo must contain at least one valid `skills/` or `stacks/` folder with conforming JSON files. Duplicate submissions are ignored. Skills and stacks appear in global search almost immediately after submission.
+The repo must contain at least one valid `skills/` or `stacks/` folder with conforming JSON files. Duplicate submissions are ignored.
+
+### `kenji registry update`
+
+Re-crawl a registered registry and refresh its index. Use this after updating your skill JSON files.
+
+```bash
+kenji registry update user/kenji-registry
+```
+
+Only that registry's index is updated. Other registries are not affected. If the crawl fails, the existing index is left intact.
 
 ### `kenji registry list`
 
