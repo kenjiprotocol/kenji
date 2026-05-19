@@ -8,10 +8,12 @@ const readline = require('readline');
 const {
   projectSkillsDir,
   globalSkillsDir,
+  globalStacksDir,
   ensureProject,
   ensureGlobal,
   getSkillMetadata,
-  findSkillDir
+  findSkillsByName,
+  listAllSkills
 } = require('./lib/paths');
 
 const {
@@ -44,7 +46,9 @@ const {
   deleteStack,
   exportStack,
   importStack,
-  removeFromStack
+  removeFromStack,
+  showStack,
+  listStacks,
 } = require('./lib/stacks');
 
 const { runDoctor } = require('./lib/doctor');
@@ -145,9 +149,8 @@ program
 
     if (skill) {
       if (!(await confirmInstall(skill))) return;
-
       console.log(`\nInstalling skill "${skill.name}" from Kenji registry...`);
-      await installFromGitHub(skill.repo, options.force, isGlobal, skill.entry || null);
+      await installFromGitHub(skill.repo, options.force, isGlobal, skill.entry || null, skill.name);
       return;
     }
 
@@ -201,37 +204,21 @@ program
   .option('-g, --global', 'List globally installed skills')
   .description('List installed skills')
   .action(async (options) => {
+    const baseDir = options.global ? globalSkillsDir : projectSkillsDir;
+    if (options.global) await ensureGlobal();
+    else await ensureProject();
 
-    if (options.global) {
-
-      await ensureGlobal();
-
-      const skills = await fs.readdir(globalSkillsDir);
-
-      if (!skills.length) {
-        console.log("No global skills installed.");
-        return;
-      }
-
-      console.log("\nGlobal skills:\n");
-
-      skills.forEach(s => console.log(`- ${s}`));
-
-    } else {
-
-      await ensureProject();
-
-      const skills = await fs.readdir(projectSkillsDir);
-
-      if (!skills.length) {
-        console.log("No local skills installed in this folder.");
-        return;
-      }
-
-      console.log("\nLocal skills (current folder):\n");
-
-      skills.forEach(s => console.log(`- ${s}`));
+    const skills = await listAllSkills(baseDir);
+    if (!skills.length) {
+      console.log(options.global
+        ? 'No global skills installed.'
+        : 'No local skills installed in this folder.');
+      return;
     }
+
+    console.log(options.global ? '\nGlobal skills:\n' : '\nLocal skills (current folder):\n');
+    skills.forEach(s => console.log(`  ${s.repoSlug}/${s.skillSlug}`));
+    console.log('');
   });
 
 /* ------------------------------
@@ -286,53 +273,11 @@ program
     }
 
     else if (action === 'list') {
-
-      let files;
-      try { files = await fs.readdir(globalStacksDir); } catch { files = []; }
-
-      const stacks = files.filter(f => f.endsWith('.json'));
-      if (!stacks.length) {
-        console.log('No stacks created.');
-        return;
-      }
-
-      console.log('\nStacks:\n');
-      stacks.forEach(f => console.log(`- ${f.replace('.json', '')}`));
-      console.log('');
+      await listStacks();
     }
 
     else if (action === 'show') {
-
-      if (!name) {
-        console.log('Usage: kenji stack show <name>');
-        return;
-      }
-
-      // Case-insensitive stack file lookup
-      let showPath = null;
-      try {
-        const entries = await fs.readdir(globalStacksDir);
-        const m = entries.find(e => e.toLowerCase() === name.toLowerCase() + '.json');
-        if (m) showPath = path.join(globalStacksDir, m);
-      } catch { }
-
-      if (!showPath) {
-        console.log(`\nStack '${name}' does not exist.\n`);
-        console.log(`Run: kenji stack create ${name}\n`);
-        return;
-      }
-
-      const stack = await fs.readJson(showPath);
-      console.log(`\nStack: ${stack.name}`);
-      console.log(`Skills (${stack.skills.length}):\n`);
-      stack.skills.forEach((s, i) => {
-        if (typeof s === 'object') {
-          console.log(`  ${i + 1}. [${s.type}] ${s.value}`);
-        } else {
-          console.log(`  ${i + 1}. ${s}`);
-        }
-      });
-      console.log('');
+      await showStack(name);
     }
 
     else {
@@ -348,39 +293,36 @@ program
 program
   .command('remove <name>')
   .option('-g, --global', 'Remove global skill')
-  .description('Remove an installed skill')
+  .description('Remove an installed skill (use repo-slug/skill-slug to disambiguate)')
   .action(async (name, options) => {
-
     const isGlobal = options.global || false;
+    const baseDir = isGlobal ? globalSkillsDir : projectSkillsDir;
+    if (isGlobal) await ensureGlobal();
+    else await ensureProject();
 
-    if (isGlobal) {
+    const matches = await findSkillsByName(baseDir, name);
 
-      await ensureGlobal();
-
-      const skillPath = await findSkillDir(globalSkillsDir, name);
-
-      if (!skillPath) {
-        console.log(`Global skill "${name}" not found.`);
-        return;
-      }
-
-      await fs.remove(skillPath);
-      console.log(`✓ Removed global skill ${path.basename(skillPath)}`);
-
-    } else {
-
-      await ensureProject();
-
-      const skillPath = await findSkillDir(projectSkillsDir, name);
-
-      if (!skillPath) {
-        console.log(`Local skill "${name}" not found.`);
-        return;
-      }
-
-      await fs.remove(skillPath);
-      console.log(`✓ Removed local skill ${path.basename(skillPath)}`);
+    if (!matches.length) {
+      console.log(`\n${isGlobal ? 'Global' : 'Local'} skill "${name}" not found.`);
+      console.log(`Run: kenji list${isGlobal ? ' --global' : ''}\n`);
+      return;
     }
+
+    if (matches.length > 1) {
+      console.log(`\nMultiple installed skills match "${name}":\n`);
+      matches.forEach(m => console.log(`  - ${m.repoSlug}/${m.skillSlug}`));
+      console.log(`\nSpecify the full path:\n  kenji remove ${matches[0].repoSlug}/${matches[0].skillSlug}\n`);
+      return;
+    }
+
+    const { repoSlug, skillSlug, fullPath } = matches[0];
+    await fs.remove(fullPath);
+    console.log(`✓ Removed ${repoSlug}/${skillSlug}`);
+
+    // Clean up empty repo folder
+    const repoDir = path.dirname(fullPath);
+    const remaining = await fs.readdir(repoDir);
+    if (!remaining.length) await fs.remove(repoDir);
   });
 
 /* ------------------------------
@@ -392,38 +334,42 @@ program
   .description('Copy a globally installed skill into the current project')
   .option('-f, --force', 'Overwrite if already installed locally')
   .action(async (skill, options) => {
-
     await ensureGlobal();
     await ensureProject();
 
-    const globalPath = await findSkillDir(globalSkillsDir, skill);
-    if (!globalPath) {
+    const globalMatches = await findSkillsByName(globalSkillsDir, skill);
+
+    if (!globalMatches.length) {
       console.log(`\nGlobal skill "${skill}" not found.`);
       console.log('Run: kenji list --global\n');
       return;
     }
 
-    // Preserve the real folder name for the local copy
-    const realName = path.basename(globalPath);
-    const localPath = path.join(projectSkillsDir, realName);
-    const existingLocal = await findSkillDir(projectSkillsDir, skill);
+    if (globalMatches.length > 1) {
+      console.log(`\nMultiple global skills match "${skill}":\n`);
+      globalMatches.forEach(m => console.log(`  - ${m.repoSlug}/${m.skillSlug}`));
+      console.log(`\nSpecify the full path:\n  kenji use ${globalMatches[0].repoSlug}/${globalMatches[0].skillSlug}\n`);
+      return;
+    }
 
-    if (existingLocal && !options.force) {
-      console.log(`\nSkill "${realName}" already installed in this project.`);
+    const { repoSlug, skillSlug, fullPath: globalPath } = globalMatches[0];
+    const localPath = path.join(projectSkillsDir, repoSlug, skillSlug);
+
+    if (await fs.pathExists(localPath) && !options.force) {
+      console.log(`\nSkill "${repoSlug}/${skillSlug}" already installed in this project.`);
       console.log('Use --force to overwrite.\n');
       return;
     }
 
     try {
+      await fs.ensureDir(path.dirname(localPath));
       await fs.copy(globalPath, localPath, { overwrite: true });
-
       const meta = await getSkillMetadata(localPath);
       if (meta) {
         meta.scope = 'local';
         await fs.writeJson(path.join(localPath, 'kenji.json'), meta, { spaces: 2 });
       }
-
-      console.log(`\n✓ Skill "${realName}" copied to current project.\n`);
+      console.log(`\n✓ Skill "${repoSlug}/${skillSlug}" copied to current project.\n`);
     } catch (err) {
       console.log(`\nFailed to copy skill: ${err.message}\n`);
     }
@@ -450,38 +396,38 @@ program
   .option('--json', 'Output as JSON')
   .option('--verbose', 'Show full metadata')
   .action(async (skill, options) => {
+    // Search local first, then global
+    const localMatches = await findSkillsByName(projectSkillsDir, skill);
+    const globalMatches = await findSkillsByName(globalSkillsDir, skill);
+    const allMatches = [
+      ...localMatches.map(m => ({ ...m, scope: 'local' })),
+      ...globalMatches.map(m => ({ ...m, scope: 'global' }))
+    ];
 
-    const localPath = await findSkillDir(projectSkillsDir, skill);
-    const globalPath = await findSkillDir(globalSkillsDir, skill);
-
-    let foundPath = null;
-    let scope = null;
-
-    if (localPath) {
-      foundPath = localPath;
-      scope = 'local';
-    } else if (globalPath) {
-      foundPath = globalPath;
-      scope = 'global';
-    }
-
-    if (!foundPath) {
-      console.log(`\nSkill not installed locally or globally.\n`);
+    if (!allMatches.length) {
+      console.log('\nSkill not installed locally or globally.\n');
       return;
     }
 
-    const meta = await getSkillMetadata(foundPath);
-    const realName = path.basename(foundPath);
+    if (allMatches.length > 1) {
+      console.log(`\nMultiple installations match "${skill}":\n`);
+      allMatches.forEach(m => console.log(`  - [${m.scope}] ${m.repoSlug}/${m.skillSlug}`));
+      console.log(`\nSpecify the full path:\n  kenji where ${allMatches[0].repoSlug}/${allMatches[0].skillSlug}\n`);
+      return;
+    }
 
+    const { repoSlug, skillSlug, fullPath, scope } = allMatches[0];
     const displayPath = scope === 'local'
-      ? path.join('.kenji', 'skills', realName)
-      : path.join('~', '.kenji', 'skills', realName);
+      ? path.join('.kenji', 'skills', repoSlug, skillSlug)
+      : path.join('~', '.kenji', 'skills', repoSlug, skillSlug);
+
+    const meta = await getSkillMetadata(fullPath);
 
     if (options.json) {
       console.log(JSON.stringify({
-        skill: realName,
-        scope: scope,
-        path: foundPath,
+        skill: `${repoSlug}/${skillSlug}`,
+        scope,
+        path: fullPath,
         source: meta?.source || null,
         install_type: meta?.install_type || null,
         installed_at: meta?.installed_at || null
@@ -490,15 +436,13 @@ program
     }
 
     console.log('');
-    console.log(`  Skill:        ${realName}`);
+    console.log(`  Skill:        ${repoSlug}/${skillSlug}`);
     console.log(`  Location:     ${scope}`);
     console.log(`  Path:         ${displayPath}`);
-
     if (meta) {
       if (meta.source) console.log(`  Installed from: ${meta.source}`);
       if (meta.install_type) console.log(`  Install type:   ${meta.install_type}`);
       if (meta.installed_at) console.log(`  Installed at:   ${meta.installed_at}`);
-
       if (options.verbose) {
         console.log('');
         console.log('  Full metadata:');
@@ -507,7 +451,6 @@ program
     } else {
       console.log('  (no kenji.json metadata found)');
     }
-
     console.log('');
   });
 
@@ -720,14 +663,57 @@ program
       return;
     }
 
+    if (action === 'update') {
+      const input = args[0];
+      if (!input) {
+        console.log('\nUsage: kenji registry update <user/repo>\n');
+        return;
+      }
+
+      const repo = input
+        .replace(/^https?:\/\//, '')
+        .replace(/^github\.com\//, '')
+        .replace(/\/+$/, '')
+        .split('/').slice(0, 2).join('/');
+
+      if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) {
+        console.log('\nInvalid repository. Use: user/repo or https://github.com/user/repo\n');
+        return;
+      }
+
+      const axios = require('axios');
+      process.stdout.write(`Refreshing registry ${repo}...\n`);
+
+      try {
+        const res = await axios.post('https://kenjiprotocol.com/api/registry/update', { repo }, {
+          timeout: 30000
+        });
+        if (res.data?.success) {
+          const { newItemCount, previousItemCount, searchIndexTotal } = res.data;
+          console.log(`\n✓ Registry refreshed.`);
+          console.log(`  Items: ${previousItemCount} → ${newItemCount}`);
+          console.log(`  Search index total: ${searchIndexTotal} items\n`);
+        } else {
+          const note = res.data?.note ? `\n  Note: ${res.data.note}` : '';
+          console.log(`\nFailed: ${res.data?.error || 'Unknown error'}${note}\n`);
+        }
+      } catch (err) {
+        const msg = err.response?.data?.error || err.message;
+        console.log(`\nFailed to update registry: ${msg}\n`);
+      }
+      return;
+    }
+
     if (action === 'list') {
       console.log('\nKnown registries are managed at: https://kenjiprotocol.com/registry\n');
       return;
     }
 
     console.log('\nUsage:');
-    console.log('  kenji registry add <user/repo>   Add a community registry');
-    console.log('  kenji registry list              List known registries\n');
+    console.log('  kenji registry add <user/repo>      Add a community registry');
+    console.log('  kenji registry update <user/repo>   Refresh an existing registry\'s index');
+    console.log('  kenji registry list                 List known registries\n');
+
   });
 
 program.parse();
