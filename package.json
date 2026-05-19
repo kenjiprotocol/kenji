@@ -1,6 +1,6 @@
 {
   "name": "@kenji-protocol/kenji",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "license": "MIT",
   "bin": {
     "kenji": "./index.js"
